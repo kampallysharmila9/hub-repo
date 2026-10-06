@@ -806,7 +806,6 @@ def main():
         problem,
         solution,
         benefit,
-        users,
         category,
         additional
     )
@@ -1073,9 +1072,6 @@ def main():
 
         "benefit":
             benefit,
-
-        "users":
-            users,
 
         "keywords":
             keywords,
