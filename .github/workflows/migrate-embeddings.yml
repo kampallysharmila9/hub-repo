@@ -18,6 +18,11 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Verify files
+        run: |
+          echo "Scripts:"
+          ls -la scripts
+
       - name: Generate embeddings
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}

@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 import json
 import os
 import sys
@@ -34,10 +32,7 @@ def fail(message):
 def generate_embedding(text):
 
     if not GEMINI_API_KEY:
-
-        fail(
-            "GEMINI_API_KEY is missing."
-        )
+        fail("GEMINI_API_KEY is missing.")
 
     url = (
         "https://generativelanguage.googleapis.com"
@@ -45,8 +40,7 @@ def generate_embedding(text):
     )
 
     payload = {
-        "model":
-            f"models/{EMBEDDING_MODEL}",
+        "model": f"models/{EMBEDDING_MODEL}",
 
         "content": {
             "parts": [
@@ -92,11 +86,7 @@ def generate_embedding(text):
 
     except urllib.error.HTTPError as error:
 
-        body = (
-            error
-            .read()
-            .decode("utf-8")
-        )
+        body = error.read().decode("utf-8")
 
         fail(
             f"Gemini API error "
@@ -106,7 +96,8 @@ def generate_embedding(text):
     except urllib.error.URLError as error:
 
         fail(
-            f"Gemini connection error: {error}"
+            f"Gemini connection error: "
+            f"{error}"
         )
 
     embedding = (
@@ -116,22 +107,11 @@ def generate_embedding(text):
     )
 
     if not embedding:
-
         fail(
             "Gemini returned no embedding."
         )
 
     return embedding
-
-
-def read_idea_markdown(file_path):
-
-    if not file_path.exists():
-        return ""
-
-    return file_path.read_text(
-        encoding="utf-8"
-    )
 
 
 def main():
@@ -166,7 +146,6 @@ def main():
     )
 
     generated = 0
-    skipped = 0
 
     for idea in ideas:
 
@@ -175,16 +154,12 @@ def main():
             "unknown"
         )
 
-        existing_embedding = (
-            idea.get("embedding")
-        )
-
         if (
             isinstance(
-                existing_embedding,
+                idea.get("embedding"),
                 list
             )
-            and len(existing_embedding) > 0
+            and idea.get("embedding")
         ):
 
             print(
@@ -192,12 +167,7 @@ def main():
                 f"- embedding already exists."
             )
 
-            skipped += 1
             continue
-
-        # ----------------------------------------------------
-        # Try to read the original Markdown file.
-        # ----------------------------------------------------
 
         file_name = idea.get(
             "file"
@@ -207,13 +177,13 @@ def main():
 
         if file_name:
 
-            text = read_idea_markdown(
-                Path(file_name)
-            )
+            path = Path(file_name)
 
-        # ----------------------------------------------------
-        # Fallback to index fields if Markdown isn't available.
-        # ----------------------------------------------------
+            if path.exists():
+
+                text = path.read_text(
+                    encoding="utf-8"
+                )
 
         if not text:
 
@@ -221,11 +191,11 @@ def main():
 Idea Title:
 {idea.get("title", "")}
 
-Problem:
+Problem / Pain Point:
 {idea.get("problem", "")}
 
 Proposed Solution:
-{idea.get("solution", idea.get("idea_text", ""))}
+{idea.get("solution", "")}
 
 Expected Benefit:
 {idea.get("benefit", "")}
@@ -237,23 +207,16 @@ Keywords:
 {", ".join(idea.get("keywords", []))}
 """.strip()
 
-        print("")
         print(
             f"Generating embedding "
             f"for idea #{idea_id}..."
         )
 
-        embedding = generate_embedding(
+        idea["embedding"] = generate_embedding(
             text
         )
 
-        idea["embedding"] = embedding
-
         generated += 1
-
-        # Save after every idea.
-        # If the job stops, running it again will
-        # continue with the remaining ideas.
 
         INDEX_PATH.write_text(
             json.dumps(
@@ -265,7 +228,7 @@ Keywords:
         )
 
         print(
-            f"✓ Idea #{idea_id} completed."
+            f"Completed idea #{idea_id}"
         )
 
     print("")
@@ -274,9 +237,6 @@ Keywords:
     print("=" * 60)
     print(
         f"Embeddings generated: {generated}"
-    )
-    print(
-        f"Already had embeddings: {skipped}"
     )
 
 
