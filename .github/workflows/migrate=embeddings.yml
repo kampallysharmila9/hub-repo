@@ -1,0 +1,39 @@
+name: Migrate Existing Idea Embeddings
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate embeddings
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          python3 scripts/migrate_embeddings.py
+
+      - name: Commit embeddings
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add ideas/index.json
+
+          if ! git diff --cached --quiet; then
+            git commit -m "Add embeddings to existing ideas"
+            git push
+          else
+            echo "No embedding changes to commit."
+          fi

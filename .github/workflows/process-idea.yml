@@ -1,0 +1,52 @@
+name: Process Idea
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  contents: write
+  issues: write
+
+# Only one idea-processing job modifies index.json at a time.
+concurrency:
+  group: idea-processing
+  cancel-in-progress: false
+
+jobs:
+  process-idea:
+
+    # Only process issues created using the Idea form.
+    if: contains(github.event.issue.labels.*.name, 'idea')
+
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Process idea
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          python3 scripts/process_idea.py
+
+      - name: Commit changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add ideas/
+
+          if ! git diff --cached --quiet; then
+            git commit -m "Add idea from issue #${{ github.event.issue.number }}"
+            git push
+          else
+            echo "No changes to commit."
+          fi

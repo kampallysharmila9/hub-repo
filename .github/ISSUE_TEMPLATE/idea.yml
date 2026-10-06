@@ -1,0 +1,85 @@
+name: Submit an Idea
+description: Submit a new product or feature idea
+title: "[IDEA] "
+labels:
+  - idea
+body:
+
+  - type: input
+    id: name
+    attributes:
+      label: Your Name
+      description: Enter your name.
+      placeholder: Jane Doe
+    validations:
+      required: true
+
+  - type: input
+    id: title
+    attributes:
+      label: Idea Title
+      description: Give your idea a short and descriptive title.
+      placeholder: Allow users to export reports as PDF
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / Pain Point
+      description: What problem are you trying to solve?
+      placeholder: |
+        Users currently have difficulty sharing reports
+        with people who do not have access to the system.
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed Solution
+      description: Describe your proposed solution.
+      placeholder: |
+        Add an option that allows users to export
+        reports as PDF files.
+    validations:
+      required: true
+
+  - type: textarea
+    id: benefit
+    attributes:
+      label: Expected Benefit
+      description: What benefit would this provide?
+      placeholder: |
+        Users could easily share, print, and archive reports.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: category
+    attributes:
+      label: Category
+      description: Select the category that best describes your idea.
+      options:
+        - User Experience
+        - Reporting
+        - Notifications
+        - Performance
+        - Security
+        - Integrations
+        - Automation
+        - Mobile
+        - Web
+        - Administration
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional Details
+      description: Add anything else that may help explain your idea.
+      placeholder: Additional context, examples, screenshots, etc.
+    validations:
+      required: false
