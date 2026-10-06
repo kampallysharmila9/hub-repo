@@ -477,9 +477,6 @@ Proposed Solution:
 Expected Benefit:
 {benefit}
 
-Who Would Benefit:
-{users}
-
 Category:
 {category}
 
@@ -576,9 +573,6 @@ keywords: [{keyword_text}]
 
 ## Expected Benefit
 
-{benefit}
-
-## Who Would Benefit?
 
 {users}
 
@@ -765,11 +759,6 @@ def main():
         "Expected Benefit"
     )
 
-    users = get_field(
-        body,
-        "Who Would Benefit?"
-    )
-
     category = get_field(
         body,
         "Category"
@@ -790,7 +779,6 @@ def main():
         "Problem / Pain Point": problem,
         "Proposed Solution": solution,
         "Expected Benefit": benefit,
-        "Who Would Benefit?": users,
         "Category": category,
     }
 

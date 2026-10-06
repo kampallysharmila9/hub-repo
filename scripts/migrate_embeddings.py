@@ -230,9 +230,6 @@ Proposed Solution:
 Expected Benefit:
 {idea.get("benefit", "")}
 
-Who Would Benefit:
-{idea.get("users", "")}
-
 Category:
 {idea.get("category", "")}
 
