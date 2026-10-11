@@ -27,6 +27,11 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
       - name: Verify files
         run: |
           echo "Current directory:"
@@ -50,6 +55,17 @@ jobs:
         run: |
           python3 scripts/process_idea.py
 
+      - name: Detect semantic duplicates
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+
+        run: |
+          echo "================================"
+          echo "🔍 DETECTING SEMANTIC DUPLICATES"
+          echo "================================"
+          python3 scripts/detect_duplicates_cross_encoder.py
+
       - name: Commit changes
         run: |
 
@@ -57,10 +73,10 @@ jobs:
 
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add ideas/
+          git add ideas/ duplicate_reports/ || true
 
           if ! git diff --cached --quiet; then
-            git commit -m "Add idea from issue #${{ github.event.issue.number }}"
+            git commit -m "Add idea from issue #${{ github.event.issue.number }} and run duplicate detection"
             git push
 
           else
