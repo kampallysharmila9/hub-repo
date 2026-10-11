@@ -410,7 +410,7 @@ def slugify(text):
 
 def create_idea_file(
     idea_id,
-    name,
+    username,
     title,
     category,
     problem,
@@ -437,7 +437,7 @@ def create_idea_file(
     content = f"""---
 id: {idea_id}
 issue_number: {issue_number}
-name: "{name.replace('"', '\\"')}"
+username: "{username.replace('"', '\\"')}"
 title: "{title.replace('"', '\\"')}"
 category: "{category.replace('"', '\\"')}"
 submitted_at: "{submitted_at}"
@@ -581,13 +581,19 @@ def main():
         fail("Issue body is empty.")
 
     # --------------------------------------------------------
-    # Read the SIX fields
+    # Extract submitter username from GitHub
     # --------------------------------------------------------
 
-    name = get_field(
-        body,
-        "Your Name"
+    user = issue.get("user", {})
+    username = user.get("login", "Unknown")
+
+    print(
+        f"Submitter: {username}"
     )
+
+    # --------------------------------------------------------
+    # Read the FIVE fields
+    # --------------------------------------------------------
 
     title = get_field(
         body,
@@ -621,11 +627,10 @@ def main():
     )
 
     # --------------------------------------------------------
-    # Validate SIX required fields
+    # Validate FIVE required fields
     # --------------------------------------------------------
 
     required = {
-        "Your Name": name,
         "Idea Title": title,
         "Problem / Pain Point": problem,
         "Proposed Solution": solution,
@@ -646,7 +651,7 @@ def main():
             + ", ".join(missing)
         )
 
-    print("All six required fields found.")
+    print("All five required fields found.")
 
     # --------------------------------------------------------
     # Create semantic text
@@ -818,7 +823,7 @@ def main():
 
     file_path = create_idea_file(
         next_id,
-        name,
+        username,
         title,
         category,
         problem,
@@ -848,8 +853,8 @@ def main():
         "file":
             file_path,
 
-        "name":
-            name,
+        "username":
+            username,
 
         "title":
             title,
@@ -888,7 +893,7 @@ def main():
     create_issue_comment(
         f"""## ✅ Idea Recorded
 
-Thank you{f", {name}" if name else ""}!
+Thank you, @{username}!
 
 **Idea:** {title}
 
