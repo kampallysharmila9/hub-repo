@@ -4,7 +4,6 @@ title: "[IDEA] "
 labels:
   - idea
 body:
-
   - type: textarea
     id: problem
     attributes:
