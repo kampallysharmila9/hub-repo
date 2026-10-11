@@ -17,10 +17,10 @@ EMBEDDING_MODEL = "gemini-embedding-2-preview"
 EMBEDDING_DIMENSIONS = 768
 
 # Strong match = duplicate
-DUPLICATE_THRESHOLD = 0.90
+DUPLICATE_THRESHOLD = 0.92
 
 # Possible match = flag for review
-POSSIBLE_DUPLICATE_THRESHOLD = 0.75
+POSSIBLE_DUPLICATE_THRESHOLD = 0.82
 
 
 # ============================================================
