@@ -17,10 +17,16 @@ EMBEDDING_MODEL = "gemini-embedding-2-preview"
 EMBEDDING_DIMENSIONS = 768
 
 # Strong match = duplicate
-DUPLICATE_THRESHOLD = 0.90
+# Raised to require a more convincing semantic match before auto-blocking.
+DUPLICATE_THRESHOLD = 0.92
 
 # Possible match = flag for review
-POSSIBLE_DUPLICATE_THRESHOLD = 0.75
+# Tuned to avoid false positives from boilerplate issue form text.
+POSSIBLE_DUPLICATE_THRESHOLD = 0.82
+
+# Secondary signal required to avoid generic template matches.
+MIN_KEYWORD_SCORE = 0.15
+MIN_COMBINED_SCORE = 0.72
 
 
 # ============================================================
@@ -51,13 +57,17 @@ STOPWORDS = {
     "their", "into", "also", "when", "where", "what",
     "while", "your", "than", "them", "they", "been",
     "were", "being", "could", "very", "more", "some",
-    "want", "like", "idea", "user", "users"
+    "want", "like", "idea", "ideas", "user", "users",
+    "problem", "pain", "point", "proposed", "solution",
+    "expected", "benefit", "category", "additional",
+    "details", "title", "core", "functionality"
 }
 
 
 # ============================================================
 # BASIC HELPERS
 # ============================================================
+
 
 def fail(message):
     print(f"ERROR: {message}", file=sys.stderr)
@@ -364,17 +374,20 @@ def build_semantic_text(
     additional
 ):
     """
-    Build condensed text for Gemini embedding.
-    Only first 100 chars of each field to minimize data sent.
+    Keep it concise but avoid template boilerplate terms that dominate all idea embeddings.
     """
 
-    return f"""
-Category: {category}
-Core idea: {title}
-Problem domain: {problem[:100] if problem else 'N/A'}
-Solution type: {solution[:100] if solution else 'N/A'}
-Benefits: {benefit[:100] if benefit else 'N/A'}
-""".strip()
+    parts = [
+        title.strip(),
+        (problem or "")[:200].strip(),
+        (solution or "")[:200].strip(),
+        (benefit or "")[:200].strip(),
+        (category or "")[:80].strip(),
+    ]
+
+    return "\n".join(
+        part for part in parts if part
+    )
 
 
 # ============================================================
@@ -548,10 +561,6 @@ If you believe your idea is genuinely different, explain why in a comment so a m
     add_issue_label("possible-duplicate")
 
 
-# ============================================================
-# POSSIBLE DUPLICATE COMMENT
-# ============================================================
-
 def report_possible_duplicate(
     match,
     semantic_score,
@@ -584,6 +593,11 @@ This has not been automatically rejected.
 # ============================================================
 # MAIN
 # ============================================================
+
+def score_duplicate_candidates(semantic_score, keyword_score):
+    combined_score = (semantic_score * 0.7) + (keyword_score * 0.3)
+    return combined_score
+
 
 def main():
 
@@ -757,6 +771,7 @@ def main():
     best_match = None
     best_semantic_score = 0.0
     best_keyword_score = 0.0
+    best_combined_score = 0.0
 
     for entry in index["ideas"]:
 
@@ -780,14 +795,20 @@ def main():
             entry.get("keywords", [])
         )
 
+        combined_score = score_duplicate_candidates(
+            semantic_score,
+            keyword_score
+        )
+
         print(
             f"Idea #{entry.get('id')}: "
             f"semantic={semantic_score:.4f}, "
-            f"keywords={keyword_score:.4f}"
+            f"keywords={keyword_score:.4f}, "
+            f"combined={combined_score:.4f}"
         )
 
-        if semantic_score > best_semantic_score:
-
+        if combined_score > best_combined_score:
+            best_combined_score = combined_score
             best_semantic_score = semantic_score
             best_keyword_score = keyword_score
             best_match = entry
@@ -797,10 +818,10 @@ def main():
     # --------------------------------------------------------
 
     if best_match:
-
         if (
-            best_semantic_score
-            >= DUPLICATE_THRESHOLD
+            best_semantic_score >= DUPLICATE_THRESHOLD
+            and best_keyword_score >= MIN_KEYWORD_SCORE
+            and best_combined_score >= MIN_COMBINED_SCORE
         ):
 
             print(
@@ -816,8 +837,9 @@ def main():
             return
 
         if (
-            best_semantic_score
-            >= POSSIBLE_DUPLICATE_THRESHOLD
+            best_semantic_score >= POSSIBLE_DUPLICATE_THRESHOLD
+            and best_keyword_score >= MIN_KEYWORD_SCORE
+            and best_combined_score >= MIN_COMBINED_SCORE
         ):
 
             print(
