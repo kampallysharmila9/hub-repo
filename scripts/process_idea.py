@@ -17,10 +17,10 @@ EMBEDDING_MODEL = "gemini-embedding-2-preview"
 EMBEDDING_DIMENSIONS = 768
 
 # Strong match = duplicate
-DUPLICATE_THRESHOLD = 0.92
+DUPLICATE_THRESHOLD = 0.90
 
 # Possible match = flag for review
-POSSIBLE_DUPLICATE_THRESHOLD = 0.82
+POSSIBLE_DUPLICATE_THRESHOLD = 0.75
 
 
 # ============================================================
@@ -352,7 +352,7 @@ def generate_embedding(text):
 
 
 # ============================================================
-# BUILD TEXT FOR EMBEDDING
+# BUILD TEXT FOR EMBEDDING (PRIVACY-FIRST)
 # ============================================================
 
 def build_semantic_text(
@@ -363,7 +363,36 @@ def build_semantic_text(
     category,
     additional
 ):
+    """
+    Build condensed text for Gemini embedding.
+    Only first 100 chars of each field to minimize data sent.
+    """
 
+    return f"""
+Category: {category}
+Core idea: {title}
+Problem domain: {problem[:100] if problem else 'N/A'}
+Solution type: {solution[:100] if solution else 'N/A'}
+Benefits: {benefit[:100] if benefit else 'N/A'}
+""".strip()
+
+
+# ============================================================
+# BUILD FULL TEXT FOR LOCAL STORAGE
+# ============================================================
+
+def build_full_semantic_text(
+    title,
+    problem,
+    solution,
+    benefit,
+    category,
+    additional
+):
+    """
+    Full content kept locally (not sent to API).
+    Used only for local keyword extraction and storage.
+    """
     return f"""
 Idea Title:
 {title}
@@ -576,9 +605,13 @@ def main():
     issue = get_issue()
 
     body = issue.get("body") or ""
+    title = issue.get("title", "").replace("[IDEA] ", "").strip()
 
     if not body:
         fail("Issue body is empty.")
+
+    if not title:
+        fail("Issue title is missing.")
 
     # --------------------------------------------------------
     # Extract submitter username from GitHub
@@ -592,13 +625,8 @@ def main():
     )
 
     # --------------------------------------------------------
-    # Read the FIVE fields
+    # Read the FOUR form fields (new template)
     # --------------------------------------------------------
-
-    title = get_field(
-        body,
-        "Idea Title"
-    )
 
     problem = get_field(
         body,
@@ -627,11 +655,10 @@ def main():
     )
 
     # --------------------------------------------------------
-    # Validate FIVE required fields
+    # Validate FOUR required fields
     # --------------------------------------------------------
 
     required = {
-        "Idea Title": title,
         "Problem / Pain Point": problem,
         "Proposed Solution": solution,
         "Expected Benefit": benefit,
@@ -651,13 +678,13 @@ def main():
             + ", ".join(missing)
         )
 
-    print("All five required fields found.")
+    print("All required fields found.")
 
     # --------------------------------------------------------
-    # Create semantic text
+    # Build full text (kept locally only)
     # --------------------------------------------------------
 
-    semantic_text = build_semantic_text(
+    full_semantic_text = build_full_semantic_text(
         title,
         problem,
         solution,
@@ -667,11 +694,11 @@ def main():
     )
 
     # --------------------------------------------------------
-    # Keywords
+    # Keywords (extracted from full text, stored locally)
     # --------------------------------------------------------
 
     keywords = extract_keywords(
-        semantic_text
+        full_semantic_text
     )
 
     print(
@@ -679,7 +706,24 @@ def main():
     )
 
     # --------------------------------------------------------
-    # Generate embedding
+    # Build condensed text for Gemini (PRIVACY-FIRST)
+    # --------------------------------------------------------
+
+    condensed_text = build_semantic_text(
+        title,
+        problem,
+        solution,
+        benefit,
+        category,
+        additional
+    )
+
+    print(
+        f"Sending condensed summary to Gemini API ({len(condensed_text)} chars)..."
+    )
+
+    # --------------------------------------------------------
+    # Generate embedding from condensed text
     # --------------------------------------------------------
 
     print(
@@ -687,7 +731,7 @@ def main():
     )
 
     embedding = generate_embedding(
-        semantic_text
+        condensed_text
     )
 
     print(
