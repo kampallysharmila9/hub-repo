@@ -1,6 +1,5 @@
 
 import json
-import math
 import os
 import re
 import sys
@@ -8,23 +7,23 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from pathlib import Path
 
 
-# --------------------------------------------------
-# Configuration
-# --------------------------------------------------
+# ============================================================
+# CONFIGURATION
+# ============================================================
 
-EMBEDDING_MODEL = "gemini-embedding-2-preview"
-EMBEDDING_DIMENSIONS = 768
-
-DUPLICATE_THRESHOLD = 0.92
-POSSIBLE_DUPLICATE_THRESHOLD = 0.82
-MIN_KEYWORD_SCORE = 0.15
-MIN_COMBINED_SCORE = 0.72
+GEMINI_MODEL = "gemini-2.5-flash"
 
 IDEAS_DIR = Path("ideas")
 INDEX_FILE = IDEAS_DIR / "index.json"
+
+# Gemini receives up to this many shortlisted ideas per request.
+# Set to None to send every existing idea in one request.
+# For a large repository, use a shortlist or process ideas in batches.
+MAX_CANDIDATES = 40
 
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
@@ -42,19 +41,18 @@ STOPWORDS = {
     "them", "then", "there", "these", "they", "this", "those",
     "through", "under", "very", "want", "well", "were", "what",
     "when", "where", "which", "while", "will", "with", "would",
-    "your", "you", "idea", "ideas", "problem", "solution",
-    "benefit", "benefits"
+    "your", "you", "idea", "ideas", "create", "build", "make",
+    "using", "proposed", "expected", "benefit", "benefits",
 }
 
 
-# --------------------------------------------------
-# GitHub API helpers
-# --------------------------------------------------
+# ============================================================
+# GITHUB API
+# ============================================================
 
 def github_request(method, endpoint, payload=None):
-    """Make an authenticated GitHub API request."""
     if not GITHUB_TOKEN:
-        raise RuntimeError("GITHUB_TOKEN environment variable is missing.")
+        raise RuntimeError("GITHUB_TOKEN is missing.")
 
     url = (
         endpoint
@@ -62,14 +60,14 @@ def github_request(method, endpoint, payload=None):
         else f"{GITHUB_API_URL}{endpoint}"
     )
 
-    data = None
     headers = {
         "Accept": "application/vnd.github+json",
         "Authorization": f"Bearer {GITHUB_TOKEN}",
         "X-GitHub-Api-Version": "2022-11-28",
-        "User-Agent": "idea-submission-processor",
+        "User-Agent": "idea-duplicate-checker",
     }
 
+    data = None
     if payload is not None:
         data = json.dumps(payload).encode("utf-8")
         headers["Content-Type"] = "application/json"
@@ -86,14 +84,13 @@ def github_request(method, endpoint, payload=None):
             body = response.read().decode("utf-8")
             return json.loads(body) if body else None
     except urllib.error.HTTPError as exc:
-        error_body = exc.read().decode("utf-8", errors="replace")
+        body = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(
-            f"GitHub API request failed ({exc.code}): {error_body}"
+            f"GitHub API error {exc.code}: {body}"
         ) from exc
 
 
 def add_issue_comment(message):
-    """Post a comment on the current issue."""
     github_request(
         "POST",
         f"/repos/{GITHUB_REPOSITORY}/issues/{ISSUE_NUMBER}/comments",
@@ -102,7 +99,6 @@ def add_issue_comment(message):
 
 
 def add_issue_labels(*labels):
-    """Add labels to the current issue."""
     github_request(
         "POST",
         f"/repos/{GITHUB_REPOSITORY}/issues/{ISSUE_NUMBER}/labels",
@@ -110,12 +106,11 @@ def add_issue_labels(*labels):
     )
 
 
-# --------------------------------------------------
-# Issue parsing
-# --------------------------------------------------
+# ============================================================
+# ISSUE FORM PARSING
+# ============================================================
 
 def get_field(body, field_name):
-    """Extract a field from a GitHub issue-form body."""
     pattern = (
         r"^###\s+"
         + re.escape(field_name)
@@ -144,7 +139,6 @@ def get_field(body, field_name):
 
 
 def normalize_issue_title(title):
-    """Remove common issue-form title prefixes."""
     return re.sub(
         r"^\s*\[IDEA\]\s*:?\s*",
         "",
@@ -153,182 +147,339 @@ def normalize_issue_title(title):
     ).strip()
 
 
-# --------------------------------------------------
-# Text and keyword processing
-# --------------------------------------------------
+# ============================================================
+# OPTIONAL PYTHON KEYWORD SHORTLIST
+# ============================================================
+
+def normalize_text(text):
+    return re.sub(
+        r"[^a-z0-9+#]+",
+        " ",
+        str(text or "").lower(),
+    ).strip()
+
 
 def extract_keywords(text):
-    """Extract normalized keywords for lexical comparison."""
-    words = re.findall(r"[a-zA-Z0-9+#.-]+", (text or "").lower())
-
-    return sorted({
-        word
-        for word in words
-        if len(word) >= 4 and word not in STOPWORDS
-    })
-
-
-def keyword_similarity(keywords_a, keywords_b):
-    """Calculate Jaccard similarity between two keyword collections."""
-    set_a = set(keywords_a or [])
-    set_b = set(keywords_b or [])
-
-    if not set_a or not set_b:
-        return 0.0
-
-    union = set_a | set_b
-
-    if not union:
-        return 0.0
-
-    return len(set_a & set_b) / len(union)
-
-
-def build_full_semantic_text(
-    title,
-    problem,
-    solution,
-    benefit,
-    audience,
-    category,
-    additional,
-):
-    """Build the complete text used for keyword extraction."""
-    return "\n".join(
-        part.strip()
-        for part in [
-            f"Title: {title}",
-            f"Problem: {problem}",
-            f"Proposed solution: {solution}",
-            f"Expected benefit: {benefit}",
-            f"Target audience: {audience}",
-            f"Category: {category}",
-            f"Additional details: {additional}",
-        ]
-        if part and part.strip()
+    words = re.findall(
+        r"[a-zA-Z0-9+#]+",
+        str(text or "").lower(),
     )
 
-
-def build_semantic_text(
-    title,
-    problem,
-    solution,
-    benefit,
-    audience,
-    category,
-):
-    """Build a consistent text representation for embeddings."""
-    return "\n".join([
-        f"Title: {title}",
-        f"Problem: {problem}",
-        f"Proposed solution: {solution}",
-        f"Expected benefit: {benefit}",
-        f"Target audience: {audience}",
-        f"Category: {category}",
-    ])
+    return {
+        word for word in words
+        if len(word) >= 3 and word not in STOPWORDS
+    }
 
 
-# --------------------------------------------------
-# Embeddings
-# --------------------------------------------------
+def lexical_similarity(text_a, text_b):
+    """Return a lightweight score used only to rank candidates."""
+    words_a = extract_keywords(text_a)
+    words_b = extract_keywords(text_b)
 
-def generate_embedding(text):
-    """Generate an embedding using the Gemini API."""
+    if words_a and words_b:
+        jaccard = len(words_a & words_b) / len(words_a | words_b)
+    else:
+        jaccard = 0.0
+
+    sequence = SequenceMatcher(
+        None,
+        normalize_text(text_a),
+        normalize_text(text_b),
+    ).ratio()
+
+    return max(jaccard, sequence * 0.8)
+
+
+def build_idea_text(idea):
+    """Read all useful fields available in an index entry."""
+    fields = [
+        ("Title", idea.get("title", "")),
+        ("Problem", idea.get("problem", "")),
+        ("Solution", idea.get("solution", "")),
+        ("Benefit", idea.get("benefit", "")),
+        ("Audience", idea.get("audience", "")),
+        ("Category", idea.get("category", "")),
+        ("Description", idea.get("description", "")),
+        ("Keywords", " ".join(idea.get("keywords", []))),
+    ]
+
+    parts = [
+        f"{label}: {value}"
+        for label, value in fields
+        if value and str(value).strip()
+    ]
+
+    # Older index entries may not contain the full description.
+    # Try loading the corresponding Markdown file if it exists.
+    idea_id = idea.get("id")
+    if idea_id is not None:
+        markdown_path = IDEAS_DIR / f"idea-{idea_id}.md"
+
+        if markdown_path.exists():
+            try:
+                markdown = markdown_path.read_text(encoding="utf-8")
+                if markdown.strip():
+                    parts.append("Existing idea document:\n" + markdown)
+            except OSError as exc:
+                print(
+                    f"Warning: couldn't read {markdown_path}: {exc}",
+                    file=sys.stderr,
+                )
+
+    return "\n".join(parts)
+
+
+def shortlist_candidates(new_idea_text, ideas):
+    """
+    Rank ideas lexically, but do not make the lexical score
+    the final duplicate decision.
+    """
+    ranked = []
+
+    for idea in ideas:
+        existing_text = build_idea_text(idea)
+        score = lexical_similarity(new_idea_text, existing_text)
+
+        ranked.append({
+            "idea": idea,
+            "text": existing_text,
+            "shortlist_score": score,
+        })
+
+    ranked.sort(
+        key=lambda item: item["shortlist_score"],
+        reverse=True,
+    )
+
+    if MAX_CANDIDATES is None:
+        return ranked
+
+    return ranked[:MAX_CANDIDATES]
+
+
+# ============================================================
+# GEMINI TEXT-GENERATION API
+# ============================================================
+
+def call_gemini_for_duplicates(new_idea, candidates):
+    """
+    Ask Gemini to compare meaning, problem, and solution.
+
+    No embeddings are generated or used.
+    """
     if not GEMINI_API_KEY:
-        raise RuntimeError("GEMINI_API_KEY environment variable is missing.")
+        raise RuntimeError("GEMINI_API_KEY is missing.")
 
-    model = urllib.parse.quote(EMBEDDING_MODEL, safe="-")
+    if not candidates:
+        return {
+            "decision": "unique",
+            "matches": [],
+            "summary": "No existing ideas were available to compare.",
+        }
+
+    model = urllib.parse.quote(GEMINI_MODEL, safe="-")
+    api_key = urllib.parse.quote(GEMINI_API_KEY, safe="")
+
     url = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{model}:embedContent?key="
-        f"{urllib.parse.quote(GEMINI_API_KEY, safe='')}"
+        f"{model}:generateContent?key={api_key}"
+    )
+
+    candidate_payload = []
+
+    for candidate in candidates:
+        idea = candidate["idea"]
+
+        candidate_payload.append({
+            "id": str(idea.get("id", "unknown")),
+            "title": str(idea.get("title", "Untitled idea")),
+            "category": str(idea.get("category", "")),
+            "content": candidate["text"][:6000],
+        })
+
+    prompt_data = {
+        "new_idea": {
+            "title": new_idea["title"],
+            "problem": new_idea["problem"],
+            "solution": new_idea["solution"],
+            "benefit": new_idea["benefit"],
+            "audience": new_idea["audience"],
+            "category": new_idea["category"],
+            "additional_details": new_idea["additional"],
+        },
+        "existing_ideas": candidate_payload,
+    }
+
+    prompt = """
+You are a careful duplicate-idea reviewer for a GitHub idea repository.
+
+Compare the new idea with every existing idea supplied in the JSON.
+
+Judge conceptual similarity, not just matching words. Consider:
+1. Whether they solve the same underlying problem.
+2. Whether they propose essentially the same solution or capability.
+3. Whether their intended users and expected outcomes overlap.
+4. Whether differences are meaningful or merely changes in wording.
+
+Important rules:
+- Different wording can still describe a duplicate.
+- Shared generic words alone do not prove a duplicate.
+- Two ideas in the same category are not automatically duplicates.
+- A dashboard for the same analytics purpose may be related even if
+  one mentions user statistics and another system analytics.
+- If evidence is insufficient, use possible_duplicate rather than
+  asserting a definite duplicate.
+- Compare against every supplied existing idea.
+- Do not invent existing ideas or IDs.
+- Return valid JSON only, matching this schema:
+
+{
+  "decision": "duplicate" | "possible_duplicate" | "unique",
+  "matches": [
+    {
+      "id": "existing idea ID",
+      "title": "existing idea title",
+      "classification": "duplicate" | "possible_duplicate",
+      "confidence": 0.0,
+      "reason": "short explanation of the shared or different concepts"
+    }
+  ],
+  "summary": "brief explanation"
+}
+
+Decision rules:
+- "duplicate" if at least one match is clearly the same idea.
+- "possible_duplicate" if no definite duplicate exists but at least
+  one existing idea is substantially related.
+- "unique" only if none of the supplied ideas is meaningfully similar.
+- Include every relevant match, not just the closest one.
+- Confidence must be a number between 0 and 1.
+- Use the exact existing idea ID and title from the input.
+""" + "\n\nINPUT JSON:\n" + json.dumps(
+        prompt_data,
+        ensure_ascii=False,
     )
 
     payload = {
-        "model": f"models/{EMBEDDING_MODEL}",
-        "content": {
-            "parts": [{"text": text}],
+        "systemInstruction": {
+            "parts": [{
+                "text": (
+                    "You are a precise idea-similarity classifier. "
+                    "Follow the requested JSON schema exactly."
+                )
+            }]
         },
-        "outputDimensionality": EMBEDDING_DIMENSIONS,
+        "contents": [{
+            "role": "user",
+            "parts": [{"text": prompt}],
+        }],
+        "generationConfig": {
+            "temperature": 0.1,
+            "responseMimeType": "application/json",
+        },
     }
 
     request = urllib.request.Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "User-Agent": "idea-submission-processor",
-        },
+        headers={"Content-Type": "application/json"},
         method="POST",
     )
 
     try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            result = json.loads(response.read().decode("utf-8"))
+        with urllib.request.urlopen(request, timeout=90) as response:
+            api_response = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        error_body = exc.read().decode("utf-8", errors="replace")
+        body = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(
-            f"Gemini embedding request failed ({exc.code}): {error_body}"
+            f"Gemini text-generation API error {exc.code}: {body}"
         ) from exc
 
-    embedding = result.get("embedding", {}).get("values")
-
-    if not isinstance(embedding, list):
+    try:
+        text = api_response["candidates"][0]["content"]["parts"][0]["text"]
+        result = json.loads(text)
+    except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
         raise RuntimeError(
-            "Gemini API response did not contain embedding values."
+            "Gemini returned an unexpected response instead of valid JSON."
+        ) from exc
+
+    decision = result.get("decision")
+    if decision not in {"duplicate", "possible_duplicate", "unique"}:
+        raise RuntimeError(
+            f"Gemini returned an invalid decision: {decision!r}"
         )
 
-    if len(embedding) != EMBEDDING_DIMENSIONS:
-        raise RuntimeError(
-            "Unexpected embedding dimension: "
-            f"expected {EMBEDDING_DIMENSIONS}, got {len(embedding)}."
-        )
+    valid_matches = []
+    candidate_by_id = {
+        str(item["idea"].get("id", "unknown")): item
+        for item in candidates
+    }
 
-    return embedding
+    for match in result.get("matches", []):
+        idea_id = str(match.get("id", ""))
+
+        # Ignore any IDs that were not actually provided to Gemini.
+        if idea_id not in candidate_by_id:
+            continue
+
+        classification = match.get("classification")
+        if classification not in {"duplicate", "possible_duplicate"}:
+            continue
+
+        try:
+            confidence = float(match.get("confidence", 0))
+        except (TypeError, ValueError):
+            confidence = 0.0
+
+        valid_matches.append({
+            "id": idea_id,
+            "title": candidate_by_id[idea_id]["idea"].get(
+                "title", "Untitled idea"
+            ),
+            "classification": classification,
+            "confidence": max(0.0, min(1.0, confidence)),
+            "reason": str(match.get("reason", "")).strip(),
+        })
+
+    # Keep the top-level decision consistent with validated matches.
+    if any(
+        match["classification"] == "duplicate"
+        for match in valid_matches
+    ):
+        decision = "duplicate"
+    elif valid_matches:
+        decision = "possible_duplicate"
+    else:
+        decision = "unique"
+
+    return {
+        "decision": decision,
+        "matches": valid_matches,
+        "summary": str(result.get("summary", "")).strip(),
+    }
 
 
-def cosine_similarity(vector_a, vector_b):
-    """Calculate cosine similarity for two embedding vectors."""
-    if not isinstance(vector_a, list) or not isinstance(vector_b, list):
-        return 0.0
-
-    if not vector_a or len(vector_a) != len(vector_b):
-        return 0.0
-
-    dot_product = sum(a * b for a, b in zip(vector_a, vector_b))
-    norm_a = math.sqrt(sum(a * a for a in vector_a))
-    norm_b = math.sqrt(sum(b * b for b in vector_b))
-
-    if norm_a == 0 or norm_b == 0:
-        return 0.0
-
-    return dot_product / (norm_a * norm_b)
-
-
-# --------------------------------------------------
-# Index and file helpers
-# --------------------------------------------------
+# ============================================================
+# INDEX AND IDEA FILES
+# ============================================================
 
 def load_index():
-    """Load the existing idea index."""
     if not INDEX_FILE.exists():
         return []
 
     with INDEX_FILE.open("r", encoding="utf-8") as file:
-        data = json.load(file)
+        ideas = json.load(file)
 
-    if not isinstance(data, list):
+    if not isinstance(ideas, list):
         raise RuntimeError(
             f"{INDEX_FILE} must contain a JSON array of ideas."
         )
 
-    return data
+    return ideas
 
 
 def save_index(ideas):
-    """Write the updated idea index."""
     INDEX_FILE.parent.mkdir(parents=True, exist_ok=True)
-
     temporary_file = INDEX_FILE.with_suffix(".json.tmp")
 
     with temporary_file.open("w", encoding="utf-8") as file:
@@ -339,7 +490,6 @@ def save_index(ideas):
 
 
 def next_idea_id(ideas):
-    """Choose the next numeric idea ID."""
     numeric_ids = []
 
     for idea in ideas:
@@ -365,25 +515,17 @@ def create_idea_file(
     audience,
     additional,
 ):
-    """Create a Markdown file for an accepted idea."""
     IDEAS_DIR.mkdir(parents=True, exist_ok=True)
 
-    # JSON-quoted strings are safe YAML quoted scalars.
-    # This avoids backslashes inside f-string expressions.
-    escaped_username = json.dumps(username, ensure_ascii=False)
-    escaped_title = json.dumps(title, ensure_ascii=False)
-    escaped_category = json.dumps(category, ensure_ascii=False)
-
-    keyword_text = json.dumps(keywords, ensure_ascii=False)
-
+    # JSON string quoting is compatible with YAML quoted scalars.
     content = f"""---
 id: {idea_id}
 issue_number: {issue_number}
-username: {escaped_username}
-title: {escaped_title}
-category: {escaped_category}
+username: {json.dumps(username, ensure_ascii=False)}
+title: {json.dumps(title, ensure_ascii=False)}
+category: {json.dumps(category, ensure_ascii=False)}
 submitted_at: {json.dumps(submitted_at)}
-keywords: {keyword_text}
+keywords: {json.dumps(sorted(keywords), ensure_ascii=False)}
 ---
 
 # {title}
@@ -415,114 +557,55 @@ keywords: {keyword_text}
 - Submitted at: {submitted_at}
 """
 
-    idea_path = IDEAS_DIR / f"idea-{idea_id}.md"
-    idea_path.write_text(content, encoding="utf-8")
+    path = IDEAS_DIR / f"idea-{idea_id}.md"
+    path.write_text(content, encoding="utf-8")
+    return path
 
-    return idea_path
 
+# ============================================================
+# GEMINI RESULT FORMATTING
+# ============================================================
 
-# --------------------------------------------------
-# Duplicate detection
-# --------------------------------------------------
+def format_matches(matches):
+    if not matches:
+        return "No matching existing ideas were identified."
 
-def find_best_match(new_embedding, new_keywords, ideas):
-    """Find the existing idea with the strongest combined match."""
-    best_match = None
-    best_combined_score = -1.0
+    lines = []
 
-    for idea in ideas:
-        existing_embedding = idea.get("embedding")
-
-        # Skip entries that cannot be compared semantically.
-        if not isinstance(existing_embedding, list):
-            continue
-
-        semantic_score = cosine_similarity(
-            new_embedding,
-            existing_embedding,
+    for match in matches[:10]:
+        lines.append(
+            f"### {match['title']} (ID: {match['id']})"
+        )
+        lines.append(
+            f"- Classification: {match['classification']}"
+        )
+        lines.append(
+            f"- Confidence: {match['confidence']:.0%}"
         )
 
-        keyword_score = keyword_similarity(
-            new_keywords,
-            idea.get("keywords", []),
+        if match["reason"]:
+            lines.append(f"- Reason: {match['reason']}")
+
+        lines.append("")
+
+    if len(matches) > 10:
+        lines.append(
+            f"_And {len(matches) - 10} additional matches._"
         )
 
-        combined_score = (
-            semantic_score * 0.7
-            + keyword_score * 0.3
-        )
-
-        if combined_score > best_combined_score:
-            best_combined_score = combined_score
-            best_match = {
-                "idea": idea,
-                "semantic_score": semantic_score,
-                "keyword_score": keyword_score,
-                "combined_score": combined_score,
-            }
-
-    return best_match
+    return "\n".join(lines)
 
 
-def classify_match(match):
-    """Return duplicate, possible_duplicate, or None."""
-    if not match:
-        return None
-
-    semantic = match["semantic_score"]
-    keyword = match["keyword_score"]
-    combined = match["combined_score"]
-
-    if (
-        semantic >= DUPLICATE_THRESHOLD
-        and keyword >= MIN_KEYWORD_SCORE
-        and combined >= MIN_COMBINED_SCORE
-    ):
-        return "duplicate"
-
-    if (
-        semantic >= POSSIBLE_DUPLICATE_THRESHOLD
-        and keyword >= MIN_KEYWORD_SCORE
-        and combined >= MIN_COMBINED_SCORE
-    ):
-        return "possible_duplicate"
-
-    return None
-
-
-def format_match_details(match):
-    """Format the matching idea and scores for an issue comment."""
-    idea = match["idea"]
-
-    existing_title = idea.get("title", "Untitled idea")
-    existing_id = idea.get("id", "unknown")
-
-    return (
-        f"**Closest existing idea:** {existing_title} "
-        f"(ID: {existing_id})\n\n"
-        f"- Semantic similarity: "
-        f"{match['semantic_score']:.3f}\n"
-        f"- Keyword similarity: "
-        f"{match['keyword_score']:.3f}\n"
-        f"- Combined score: "
-        f"{match['combined_score']:.3f}"
-    )
-
-
-# --------------------------------------------------
-# Main workflow
-# --------------------------------------------------
+# ============================================================
+# MAIN WORKFLOW
+# ============================================================
 
 def main():
     if not GITHUB_REPOSITORY:
-        raise RuntimeError(
-            "GITHUB_REPOSITORY environment variable is missing."
-        )
+        raise RuntimeError("GITHUB_REPOSITORY is missing.")
 
     if not ISSUE_NUMBER:
-        raise RuntimeError(
-            "ISSUE_NUMBER environment variable is missing."
-        )
+        raise RuntimeError("ISSUE_NUMBER is missing.")
 
     issue_number = int(ISSUE_NUMBER)
 
@@ -531,21 +614,18 @@ def main():
         f"/repos/{GITHUB_REPOSITORY}/issues/{issue_number}",
     )
 
-    issue_body = issue.get("body") or ""
-    username = (
-        issue.get("user", {}).get("login")
-        or "unknown"
-    )
+    username = issue.get("user", {}).get("login") or "unknown"
     title = normalize_issue_title(issue.get("title", ""))
+    body = issue.get("body") or ""
 
-    problem = get_field(issue_body, "Problem / Pain Point")
-    solution = get_field(issue_body, "Proposed Solution")
-    benefit = get_field(issue_body, "Expected Benefit")
-    audience = get_field(issue_body, "Who Would Benefit?")
-    category = get_field(issue_body, "Category")
-    additional = get_field(issue_body, "Additional Details")
+    problem = get_field(body, "Problem / Pain Point")
+    solution = get_field(body, "Proposed Solution")
+    benefit = get_field(body, "Expected Benefit")
+    audience = get_field(body, "Who Would Benefit?")
+    category = get_field(body, "Category")
+    additional = get_field(body, "Additional Details")
 
-    required_fields = {
+    required = {
         "Idea Title": title,
         "Problem / Pain Point": problem,
         "Proposed Solution": solution,
@@ -554,75 +634,65 @@ def main():
         "Category": category,
     }
 
-    missing_fields = [
-        name for name, value in required_fields.items()
+    missing = [
+        name for name, value in required.items()
         if not value.strip()
     ]
 
-    if missing_fields:
+    if missing:
         add_issue_comment(
             "I couldn't process this idea because these required "
             "fields are missing or empty:\n\n"
-            + "\n".join(f"- {field}" for field in missing_fields)
+            + "\n".join(f"- {name}" for name in missing)
         )
         return
-
-    full_text = build_full_semantic_text(
-        title,
-        problem,
-        solution,
-        benefit,
-        audience,
-        category,
-        additional,
-    )
-
-    keywords = extract_keywords(full_text)
-
-    semantic_text = build_semantic_text(
-        title,
-        problem,
-        solution,
-        benefit,
-        audience,
-        category,
-    )
-
-    print(f"Generating embedding for issue #{issue_number}...")
-    embedding = generate_embedding(semantic_text)
 
     ideas = load_index()
 
-    match = find_best_match(embedding, keywords, ideas)
-    match_type = classify_match(match)
+    new_idea = {
+        "title": title,
+        "problem": problem,
+        "solution": solution,
+        "benefit": benefit,
+        "audience": audience,
+        "category": category,
+        "additional": additional,
+    }
 
-    if match_type == "duplicate":
+    new_idea_text = build_idea_text(new_idea)
+
+    print(f"Loaded {len(ideas)} existing ideas.")
+
+    candidates = shortlist_candidates(new_idea_text, ideas)
+    print(f"Sending {len(candidates)} candidates to Gemini.")
+
+    result = call_gemini_for_duplicates(new_idea, candidates)
+
+    print(f"Gemini decision: {result['decision']}")
+    print(f"Gemini summary: {result['summary']}")
+
+    if result["decision"] == "duplicate":
         add_issue_comment(
             "## Duplicate idea detected\n\n"
-            "This submission appears to be very similar to an "
-            "existing idea. It has **not** been added to the idea "
-            "index.\n\n"
-            f"{format_match_details(match)}\n\n"
-            "If this idea is meaningfully different, please explain "
-            "the distinction in the issue."
+            "Gemini found an existing idea that appears to describe "
+            "the same underlying problem or solution. This submission "
+            "has **not** been added to the index.\n\n"
+            + format_matches(result["matches"])
+            + "\n\nIf you believe this is meaningfully different, "
+            "please explain the distinction in the issue."
         )
         add_issue_labels("duplicate")
-        print("Strong duplicate detected; not storing this idea.")
+        print("Duplicate detected. Submission not recorded.")
         return
 
-    if match_type == "possible_duplicate":
-        add_issue_comment(
-            "## Possible duplicate idea\n\n"
-            "This submission resembles an existing idea, but it "
-            "will still be recorded for review.\n\n"
-            f"{format_match_details(match)}\n\n"
-            "Please review the existing idea and clarify what is "
-            "different about this submission if needed."
-        )
-        add_issue_labels("possible-duplicate")
-
-    idea_id = next_idea_id(ideas)
     submitted_at = datetime.now(timezone.utc).isoformat()
+    idea_id = next_idea_id(ideas)
+    keywords = extract_keywords(
+        " ".join([
+            title, problem, solution, benefit, audience,
+            category, additional,
+        ])
+    )
 
     idea_path = create_idea_file(
         idea_id=idea_id,
@@ -639,29 +709,45 @@ def main():
         additional=additional,
     )
 
-    new_idea = {
+    # Deliberately do not generate or store embeddings.
+    new_index_entry = {
         "id": idea_id,
         "issue_number": issue_number,
         "username": username,
         "title": title,
         "category": category,
         "submitted_at": submitted_at,
-        "keywords": keywords,
-        "embedding": embedding,
+        "keywords": sorted(keywords),
+        "problem": problem,
+        "solution": solution,
+        "benefit": benefit,
+        "audience": audience,
+        "description": new_idea_text,
     }
 
-    ideas.append(new_idea)
+    ideas.append(new_index_entry)
     save_index(ideas)
 
-    add_issue_comment(
-        "## Idea recorded successfully\n\n"
-        f"Your idea has been saved as **Idea #{idea_id}: {title}**.\n\n"
-        f"- Category: {category}\n"
-        f"- File: `{idea_path.as_posix()}`\n"
-        "- Status: recorded for review"
-    )
-
-    add_issue_labels("accepted")
+    if result["decision"] == "possible_duplicate":
+        add_issue_comment(
+            "## Possible duplicate idea\n\n"
+            "Gemini found one or more related ideas. Your submission "
+            "has been recorded for human review.\n\n"
+            + format_matches(result["matches"])
+            + "\n\n"
+            "Please review these ideas and clarify any meaningful "
+            "differences if needed."
+        )
+        add_issue_labels("possible-duplicate", "accepted")
+    else:
+        add_issue_comment(
+            "## Idea recorded successfully\n\n"
+            f"Your idea has been saved as **Idea #{idea_id}: {title}**.\n\n"
+            f"- Category: {category}\n"
+            f"- File: `{idea_path.as_posix()}`\n"
+            "- Status: recorded for review"
+        )
+        add_issue_labels("accepted")
 
     print(
         f"Recorded idea #{idea_id} from issue #{issue_number} "
